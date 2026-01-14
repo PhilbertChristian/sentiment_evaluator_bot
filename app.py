@@ -662,17 +662,37 @@ def retrieve(question: str, k: int = 6, conversation_history: list = None, opena
 
     model = model_override or os.environ.get("OPENAI_MODEL") or st.session_state.get("openai_model", DEFAULT_OPENAI_MODEL)
     
+    client = OpenAI(api_key=api_key)
+    completion_kwargs = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+    }
+
+    # Prefer new param for newer models; fallback if unsupported.
+    def _run_completion(use_new_param: bool):
+        kwargs = completion_kwargs.copy()
+        if use_new_param:
+            kwargs["max_completion_tokens"] = 1000
+        else:
+            kwargs["max_tokens"] = 1000
+        return client.chat.completions.create(**kwargs)
+
     try:
-        client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.7,
-            max_tokens=1000,
-        )
-        answer = response.choices[0].message.content.strip()
+        response = _run_completion(use_new_param=True)
     except Exception as e:
-        answer = f"⚠️ OpenAI API error: {str(e)}"
+        msg = str(e)
+        if "max_completion_tokens" in msg or "unsupported_parameter" in msg:
+            try:
+                response = _run_completion(use_new_param=False)
+            except Exception as e2:
+                answer = f"⚠️ OpenAI API error: {str(e2)}"
+                return answer, snippets
+        else:
+            answer = f"⚠️ OpenAI API error: {msg}"
+            return answer, snippets
+
+    answer = response.choices[0].message.content.strip()
     
     return answer, snippets
 
