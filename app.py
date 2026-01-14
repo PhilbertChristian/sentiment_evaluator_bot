@@ -479,7 +479,11 @@ def format_ts(seconds: float) -> str:
         return str(seconds)
 
 
-def retrieve(question: str, k: int = 6):
+def retrieve(question: str, k: int = 6, conversation_history: list = None):
+    """
+    Retrieve relevant snippets and generate an answer.
+    Includes conversation history for context continuity.
+    """
     emb_model, coll = get_clients()
     q_emb = emb_model.encode([question], convert_to_numpy=True).tolist()[0]
     res = coll.query(query_embeddings=[q_emb], n_results=k)
@@ -489,12 +493,28 @@ def retrieve(question: str, k: int = 6):
         snippets.append(
             f"[{speaker} @ {format_ts(m.get('startTime'))}-{format_ts(m.get('endTime'))}] {doc}"
         )
+    
+    # Build conversation context from history
+    history_text = ""
+    if conversation_history:
+        # Include last 5 exchanges for context (to avoid token limits)
+        recent = conversation_history[-10:]  # 10 messages = 5 Q&A pairs
+        history_parts = []
+        for msg in recent:
+            role = "User" if msg["role"] == "user" else "Assistant"
+            history_parts.append(f"{role}: {msg['content']}")
+        if history_parts:
+            history_text = "\n--- Previous conversation ---\n" + "\n".join(history_parts) + "\n--- End of history ---\n\n"
+    
     prompt = (
         "You are an analyst reviewing a conversation transcript. "
-        "Use only the provided snippets to answer. Be concise and cite speakers.\n\n"
-        "Snippets:\n"
+        "Use the provided transcript snippets to answer questions. Be concise and cite speakers.\n"
+        "If the user asks for clarification, corrections, or follow-ups, use the conversation history to understand context.\n"
+        "If the user gives feedback (like 'that's wrong' or 'expand on that'), adjust your response accordingly.\n\n"
+        f"{history_text}"
+        "Relevant transcript snippets:\n"
         + "\n".join(snippets)
-        + f"\n\nQuestion: {question}\nAnswer:"
+        + f"\n\nUser: {question}\nAssistant:"
     )
     out = subprocess.run(
         ["ollama", "run", OLLAMA_MODEL],
@@ -659,7 +679,13 @@ def main():
         st.session_state["messages"].append({"role": "user", "content": question.strip()})
         
         with st.spinner("Thinking..."):
-            answer, snippets = retrieve(question.strip(), k=st.session_state["k_value"])
+            # Pass conversation history (excluding the just-added message)
+            history = st.session_state["messages"][:-1]
+            answer, snippets = retrieve(
+                question.strip(),
+                k=st.session_state["k_value"],
+                conversation_history=history,
+            )
         
         timestamp = datetime.now().strftime("%H:%M")
         st.session_state["messages"].append({
