@@ -1,24 +1,24 @@
 """
-HeadOn GPT (local)
+HeadOn GPT
 - Uses Chroma index at data/chroma (built via scripts/local_rag.py)
-- Uses Ollama (llama3 by default) for answers
+- Uses OpenAI GPT-4o for high-quality answers
 """
 
 import json
 import os
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 from chromadb import PersistentClient
+from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
 from scripts.local_rag import build_index, CHROMA_DIR, COLLECTION
 from scripts.youtube_to_jsonl import process_youtube_to_jsonl
 
 DEFAULT_TRANSCRIPT = Path("data/video_transcripts.jsonl")
-OLLAMA_MODEL = "llama3"
+OPENAI_MODEL = "gpt-4o"
 LOG_FILE = Path("data/chat_log.jsonl")
 
 # Speaker name mapping (customize per video)
@@ -91,10 +91,14 @@ def analyze_speakers(transcript_path: Path) -> dict:
     return speakers
 
 
-def identify_speaker_with_llm(speaker_id: str, quotes: list[str]) -> dict:
-    """Use Ollama to identify who a speaker might be based on their quotes."""
+def identify_speaker_with_llm(speaker_id: str, quotes: list[str], openai_key: str = None) -> dict:
+    """Use GPT-4o to identify who a speaker might be based on their quotes."""
     if not quotes:
-        return {"name": speaker_id, "description": "Unknown speaker", "stance": "Unknown"}
+        return {"likely_role": "participant", "apparent_stance": "See transcript", "speaking_style": "conversational"}
+    
+    api_key = openai_key or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return {"likely_role": "participant", "apparent_stance": "Add API key to analyze", "speaking_style": "—"}
     
     sample = "\n".join([f"- \"{q}\"" for q in quotes[:3]])
     prompt = f"""Based on these quotes from Speaker {speaker_id} in a debate/conversation, provide a brief analysis.
@@ -106,17 +110,20 @@ Respond in exactly this JSON format (no other text):
 {{"likely_role": "interviewer/guest/host/debater", "apparent_stance": "brief 5-word stance", "speaking_style": "brief 3-word style"}}"""
 
     try:
-        out = subprocess.run(
-            ["ollama", "run", OLLAMA_MODEL],
-            input=prompt,
-            capture_output=True,
-            text=True,
-            timeout=30,
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "You are an analyst. Respond only with valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.5,
+            max_tokens=150,
         )
-        response = out.stdout.strip()
+        result = response.choices[0].message.content.strip()
         # Try to extract JSON from response
         import re
-        json_match = re.search(r'\{[^}]+\}', response)
+        json_match = re.search(r'\{[^}]+\}', result)
         if json_match:
             return json.loads(json_match.group())
     except Exception:
@@ -479,9 +486,9 @@ def format_ts(seconds: float) -> str:
         return str(seconds)
 
 
-def retrieve(question: str, k: int = 6, conversation_history: list = None):
+def retrieve(question: str, k: int = 6, conversation_history: list = None, openai_key: str = None):
     """
-    Retrieve relevant snippets and generate an answer.
+    Retrieve relevant snippets and generate an answer using GPT-4o.
     Includes conversation history for context continuity.
     """
     emb_model, coll = get_clients()
@@ -494,35 +501,52 @@ def retrieve(question: str, k: int = 6, conversation_history: list = None):
             f"[{speaker} @ {format_ts(m.get('startTime'))}-{format_ts(m.get('endTime'))}] {doc}"
         )
     
-    # Build conversation context from history
-    history_text = ""
-    if conversation_history:
-        # Include last 5 exchanges for context (to avoid token limits)
-        recent = conversation_history[-10:]  # 10 messages = 5 Q&A pairs
-        history_parts = []
-        for msg in recent:
-            role = "User" if msg["role"] == "user" else "Assistant"
-            history_parts.append(f"{role}: {msg['content']}")
-        if history_parts:
-            history_text = "\n--- Previous conversation ---\n" + "\n".join(history_parts) + "\n--- End of history ---\n\n"
+    # Build messages for OpenAI chat format
+    system_prompt = (
+        "You are an expert analyst reviewing a conversation transcript. "
+        "Use the provided transcript snippets to answer questions accurately. "
+        "Be concise, cite speakers by name, and reference timestamps when relevant. "
+        "If the user asks for clarification, corrections, or follow-ups, use the conversation history. "
+        "If the user gives feedback, adjust your response accordingly."
+    )
     
-    prompt = (
-        "You are an analyst reviewing a conversation transcript. "
-        "Use the provided transcript snippets to answer questions. Be concise and cite speakers.\n"
-        "If the user asks for clarification, corrections, or follow-ups, use the conversation history to understand context.\n"
-        "If the user gives feedback (like 'that's wrong' or 'expand on that'), adjust your response accordingly.\n\n"
-        f"{history_text}"
-        "Relevant transcript snippets:\n"
+    messages = [{"role": "system", "content": system_prompt}]
+    
+    # Add conversation history
+    if conversation_history:
+        recent = conversation_history[-10:]  # Last 5 Q&A pairs
+        for msg in recent:
+            messages.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+    
+    # Add current question with snippets
+    user_message = (
+        f"Relevant transcript snippets:\n"
         + "\n".join(snippets)
-        + f"\n\nUser: {question}\nAssistant:"
+        + f"\n\nQuestion: {question}"
     )
-    out = subprocess.run(
-        ["ollama", "run", OLLAMA_MODEL],
-        input=prompt,
-        capture_output=True,
-        text=True,
-    )
-    return out.stdout.strip(), snippets
+    messages.append({"role": "user", "content": user_message})
+    
+    # Call OpenAI GPT-4o
+    api_key = openai_key or os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        return "⚠️ OpenAI API key not set. Please add it in Settings.", snippets
+    
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        answer = response.choices[0].message.content.strip()
+    except Exception as e:
+        answer = f"⚠️ OpenAI API error: {str(e)}"
+    
+    return answer, snippets
 
 
 def main():
@@ -549,6 +573,18 @@ def main():
     
     with top_col1:
         with st.popover("⚙️ Settings"):
+            st.markdown("**🔑 OpenAI API Key**")
+            openai_key_input = st.text_input(
+                "OpenAI Key",
+                value=st.session_state.get("openai_key", os.environ.get("OPENAI_API_KEY", "")),
+                type="password",
+                label_visibility="collapsed",
+                placeholder="sk-...",
+            )
+            if openai_key_input:
+                st.session_state["openai_key"] = openai_key_input
+            
+            st.divider()
             st.markdown("**Context Depth**")
             st.session_state["k_value"] = st.slider(
                 "k", 3, 10, st.session_state["k_value"],
@@ -556,9 +592,10 @@ def main():
                 label_visibility="collapsed",
             )
             st.divider()
-            st.markdown(f"**Transcript:** `{st.session_state['transcript_path'].name}`")
+            st.caption(f"**Model:** GPT-4o")
+            st.caption(f"**Transcript:** `{st.session_state['transcript_path'].name}`")
             history = load_log()
-            st.markdown(f"**History:** {len(history)} conversations")
+            st.caption(f"**History:** {len(history)} conversations")
             
             col1, col2 = st.columns(2)
             if col1.button("Clear Chat", use_container_width=True):
@@ -641,7 +678,7 @@ def main():
                         speaker_stats = analyze_speakers(st.session_state["transcript_path"])
                         new_profiles = {}
                         for spk, stats in speaker_stats.items():
-                            analysis = identify_speaker_with_llm(spk, stats.get("quotes", []))
+                            analysis = identify_speaker_with_llm(spk, stats.get("quotes", []), st.session_state.get("openai_key"))
                             new_profiles[spk] = {**stats, **analysis}
                         st.session_state["speaker_profiles"] = new_profiles
                     st.rerun()
@@ -685,6 +722,7 @@ def main():
                 question.strip(),
                 k=st.session_state["k_value"],
                 conversation_history=history,
+                openai_key=st.session_state.get("openai_key"),
             )
         
         timestamp = datetime.now().strftime("%H:%M")

@@ -4,3 +4,4 @@ sentence-transformers>=2.7.0
 torch>=2.1.0
 assemblyai>=0.25.0
 yt-dlp>=2024.12.23
+openai>=1.0.0
