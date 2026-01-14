@@ -23,7 +23,13 @@ from scripts.local_rag import (
 from scripts.youtube_to_jsonl import process_youtube_to_jsonl
 
 DEFAULT_TRANSCRIPT = Path("data/video_transcripts.jsonl")
-OPENAI_MODEL = "gpt-4o"
+DEFAULT_OPENAI_MODEL = "gpt-4o"
+MODEL_CHOICES = [
+    "gpt-5.2",      # placeholder for newest
+    "gpt-4.1",
+    "gpt-4o",
+    "gpt-4o-mini",
+]
 LOG_FILE = Path("data/chat_log.jsonl")
 SESSION_DIR = Path("data/sessions")
 SESSION_INDEX = Path("data/session_index.json")
@@ -577,7 +583,7 @@ def speaker_display(speaker_id: str) -> str:
     return SPEAKER_NAMES.get(speaker_id, SPEAKER_NAMES.get(letter, speaker_id))
 
 
-def retrieve(question: str, k: int = 6, conversation_history: list = None, openai_key: str = None):
+def retrieve(question: str, k: int = 6, conversation_history: list = None, openai_key: str = None, model_override: str = None):
     """
     Retrieve relevant snippets and generate an answer using GPT-4o.
     Includes conversation history for context continuity.
@@ -649,15 +655,17 @@ def retrieve(question: str, k: int = 6, conversation_history: list = None, opena
     )
     messages.append({"role": "user", "content": user_message})
     
-    # Call OpenAI GPT-4o
+    # Call OpenAI
     api_key = openai_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
         return "⚠️ OpenAI API key not set. Please add it in Settings.", snippets
+
+    model = model_override or os.environ.get("OPENAI_MODEL") or st.session_state.get("openai_model", DEFAULT_OPENAI_MODEL)
     
     try:
         client = OpenAI(api_key=api_key)
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=messages,
             temperature=0.7,
             max_tokens=1000,
@@ -706,6 +714,24 @@ def main():
             )
             if openai_key_input:
                 st.session_state["openai_key"] = openai_key_input
+            
+            st.divider()
+            st.markdown("**🤖 OpenAI Model**")
+            current_model = st.session_state.get("openai_model", DEFAULT_OPENAI_MODEL)
+            model_choice = st.selectbox(
+                "Model",
+                options=MODEL_CHOICES,
+                index=MODEL_CHOICES.index(current_model) if current_model in MODEL_CHOICES else 0,
+                label_visibility="collapsed",
+            )
+            custom_model = st.text_input(
+                "Or custom model id",
+                value=current_model if current_model not in MODEL_CHOICES else "",
+                placeholder="e.g., gpt-4.1-mini",
+                label_visibility="collapsed",
+            )
+            final_model = custom_model.strip() or model_choice
+            st.session_state["openai_model"] = final_model
             
             st.divider()
             st.markdown("**Context Depth**")
@@ -874,6 +900,7 @@ def main():
                 k=st.session_state["k_value"],
                 conversation_history=history,
                 openai_key=st.session_state.get("openai_key"),
+                model_override=st.session_state.get("openai_model", DEFAULT_OPENAI_MODEL),
             )
         
         timestamp = datetime.now().strftime("%H:%M")
