@@ -14,7 +14,12 @@ from chromadb import PersistentClient
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 
-from scripts.local_rag import build_index, CHROMA_DIR, COLLECTION
+from scripts.local_rag import (
+    build_index,
+    CHROMA_DIR,
+    COLLECTION_FINE,
+    COLLECTION_COARSE,
+)
 from scripts.youtube_to_jsonl import process_youtube_to_jsonl
 
 DEFAULT_TRANSCRIPT = Path("data/video_transcripts.jsonl")
@@ -480,16 +485,18 @@ def get_clients():
     emb = SentenceTransformer("all-MiniLM-L6-v2")
     db = PersistentClient(path=CHROMA_DIR)
     try:
-        coll = db.get_collection(COLLECTION)
+        coll_f = db.get_collection(COLLECTION_FINE)
+        coll_c = db.get_collection(COLLECTION_COARSE)
     except Exception:
-        # If the collection is missing (fresh deploy), try building from the default transcript.
+        # If missing, attempt rebuild from default transcript.
         if DEFAULT_TRANSCRIPT.exists():
             build_index(DEFAULT_TRANSCRIPT, reset=True)
-            coll = db.get_collection(COLLECTION)
+            coll_f = db.get_collection(COLLECTION_FINE)
+            coll_c = db.get_collection(COLLECTION_COARSE)
         else:
             st.error("Vector index not found and default transcript is missing. Please upload a transcript or rebuild locally.")
             st.stop()
-    return emb, coll
+    return emb, coll_f, coll_c
 
 
 def format_ts(seconds: float) -> str:
@@ -504,11 +511,37 @@ def retrieve(question: str, k: int = 6, conversation_history: list = None, opena
     Retrieve relevant snippets and generate an answer using GPT-4o.
     Includes conversation history for context continuity.
     """
-    emb_model, coll = get_clients()
+    emb_model, coll_f, coll_c = get_clients()
     q_emb = emb_model.encode([question], convert_to_numpy=True).tolist()[0]
-    res = coll.query(query_embeddings=[q_emb], n_results=k)
+
+    # Two-stage semantic zoom
+    k_coarse = max(3, k)
+    k_fine_per_seg = max(2, k // 2)
+
+    # Stage 1: coarse segments
+    res_c = coll_c.query(query_embeddings=[q_emb], n_results=k_coarse)
+    seg_ids = []
+    for meta in res_c["metadatas"][0]:
+        sid = meta.get("segment_id")
+        if sid:
+            seg_ids.append(sid)
+
+    # Stage 2: fine utterances within top segments
+    candidates = []
+    for sid in seg_ids:
+        res_f = coll_f.query(
+            query_embeddings=[q_emb],
+            where={"segment_id": sid},
+            n_results=k_fine_per_seg,
+        )
+        for doc, m, dist in zip(res_f["documents"][0], res_f["metadatas"][0], res_f["distances"][0]):
+            candidates.append((dist, doc, m))
+
+    candidates.sort(key=lambda x: x[0])
+    top = candidates[:k] if candidates else []
+
     snippets = []
-    for doc, m in zip(res["documents"][0], res["metadatas"][0]):
+    for _, doc, m in top:
         speaker = m.get("personId") or m.get("speaker") or "?"
         snippets.append(
             f"[{speaker} @ {format_ts(m.get('startTime'))}-{format_ts(m.get('endTime'))}] {doc}"
