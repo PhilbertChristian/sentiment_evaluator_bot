@@ -25,6 +25,8 @@ from scripts.youtube_to_jsonl import process_youtube_to_jsonl
 DEFAULT_TRANSCRIPT = Path("data/video_transcripts.jsonl")
 OPENAI_MODEL = "gpt-4o"
 LOG_FILE = Path("data/chat_log.jsonl")
+SESSION_DIR = Path("data/sessions")
+SESSION_INDEX = Path("data/session_index.json")
 
 # Speaker name mapping (customize per video)
 SPEAKER_NAMES = {
@@ -480,6 +482,67 @@ def load_log() -> list[dict]:
     return records
 
 
+# ─────────────────────────────────────────────────────────────
+# Session management (Chat 1, Chat 2, ...)
+# ─────────────────────────────────────────────────────────────
+def ensure_session_index():
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    if not SESSION_INDEX.exists():
+        SESSION_INDEX.write_text(json.dumps({"sessions": []}, ensure_ascii=False, indent=2))
+
+
+def list_sessions() -> list[dict]:
+    ensure_session_index()
+    try:
+        data = json.loads(SESSION_INDEX.read_text())
+        return data.get("sessions", [])
+    except Exception:
+        return []
+
+
+def save_sessions_metadata(sessions: list[dict]):
+    SESSION_INDEX.write_text(json.dumps({"sessions": sessions}, ensure_ascii=False, indent=2))
+
+
+def session_path(session_id: str) -> Path:
+    safe = session_id.strip().replace(" ", "_")
+    return SESSION_DIR / f"{safe}.jsonl"
+
+
+def load_session_messages(session_id: str) -> list[dict]:
+    path = session_path(session_id)
+    if not path.exists():
+        return []
+    msgs = []
+    with path.open(encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                try:
+                    msgs.append(json.loads(line))
+                except Exception:
+                    continue
+    return msgs
+
+
+def append_session_message(session_id: str, msg: dict):
+    SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    path = session_path(session_id)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(msg, ensure_ascii=False) + "\n")
+
+
+def ensure_session_exists(session_id: str):
+    ensure_session_index()
+    sessions = list_sessions()
+    if not any(s.get("id") == session_id for s in sessions):
+        now = datetime.now().isoformat()
+        sessions.append({"id": session_id, "title": session_id, "created_at": now, "updated_at": now})
+        save_sessions_metadata(sessions)
+        # Create empty session file
+        session_path(session_id).touch()
+
+
 @st.cache_resource
 def get_clients():
     emb = SentenceTransformer("all-MiniLM-L6-v2")
@@ -610,8 +673,11 @@ def main():
     inject_css()
 
     # Initialize session state
+    ensure_session_index()
     if "messages" not in st.session_state:
         st.session_state["messages"] = []
+    if "session_id" not in st.session_state:
+        st.session_state["session_id"] = "Chat 1"
     if "transcript_path" not in st.session_state:
         st.session_state["transcript_path"] = DEFAULT_TRANSCRIPT
     if "k_value" not in st.session_state:
@@ -626,7 +692,7 @@ def main():
     # ─────────────────────────────────────────────────────────────
     # TOP BAR: Settings & Transcript dropdown
     # ─────────────────────────────────────────────────────────────
-    top_col1, top_col2 = st.columns([1, 4])
+    top_col1, top_col2, top_col3 = st.columns([1.2, 2.5, 2.5])
     
     with top_col1:
         with st.popover("⚙️ Settings"):
@@ -667,6 +733,33 @@ def main():
                     file_name="chat_history.jsonl",
                     use_container_width=True,
                 )
+
+    # Session selector / new chat
+    with top_col2:
+        st.caption("Chat Sessions")
+        sessions = list_sessions()
+        session_options = [s.get("id") for s in sessions] or ["Chat 1"]
+        current_session = st.selectbox(
+            "Select chat",
+            options=session_options,
+            index=session_options.index(st.session_state["session_id"]) if st.session_state["session_id"] in session_options else 0,
+            label_visibility="collapsed",
+        )
+        if current_session != st.session_state["session_id"]:
+            st.session_state["session_id"] = current_session
+            ensure_session_exists(current_session)
+            st.session_state["messages"] = load_session_messages(current_session)
+            st.rerun()
+
+    with top_col3:
+        st.caption("New Chat")
+        new_name = st.text_input("Chat name", value="", placeholder="e.g., Chat 2", label_visibility="collapsed")
+        if st.button("➕ Create Chat", use_container_width=True):
+            name = new_name.strip() or f"Chat {len(session_options)+1}"
+            ensure_session_exists(name)
+            st.session_state["session_id"] = name
+            st.session_state["messages"] = []
+            st.rerun()
 
     # ─────────────────────────────────────────────────────────────
     # HERO: Speaker Profiles (always visible on landing)
@@ -771,6 +864,7 @@ def main():
     
     if question and question.strip():
         st.session_state["messages"].append({"role": "user", "content": question.strip()})
+        append_session_message(st.session_state["session_id"], {"role": "user", "content": question.strip()})
         
         with st.spinner("Thinking..."):
             # Pass conversation history (excluding the just-added message)
@@ -783,13 +877,15 @@ def main():
             )
         
         timestamp = datetime.now().strftime("%H:%M")
-        st.session_state["messages"].append({
+        assistant_msg = {
             "role": "assistant",
             "content": answer,
             "snippets": snippets,
             "k": st.session_state["k_value"],
             "timestamp": timestamp,
-        })
+        }
+        st.session_state["messages"].append(assistant_msg)
+        append_session_message(st.session_state["session_id"], assistant_msg)
         
         log_interaction(
             question=question.strip(),
