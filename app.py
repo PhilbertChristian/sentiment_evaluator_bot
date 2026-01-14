@@ -94,7 +94,8 @@ def analyze_speakers(transcript_path: Path) -> dict:
 def identify_speaker_with_llm(speaker_id: str, quotes: list[str], openai_key: str = None) -> dict:
     """Use GPT-4o to identify who a speaker might be based on their quotes."""
     if not quotes:
-        return {"likely_role": "participant", "apparent_stance": "See transcript", "speaking_style": "conversational"}
+        return {Unable to deploy
+The app’s code is not connected to a remote GitHub repository. To deploy on Streamlit Community Cloud, please put your code in a GitHub repository and publish the current branch. Read more in our documentation."likely_role": "participant", "apparent_stance": "See transcript", "speaking_style": "conversational"}
     
     api_key = openai_key or os.environ.get("OPENAI_API_KEY")
     if not api_key:
@@ -475,7 +476,16 @@ def load_log() -> list[dict]:
 def get_clients():
     emb = SentenceTransformer("all-MiniLM-L6-v2")
     db = PersistentClient(path=CHROMA_DIR)
-    coll = db.get_collection(COLLECTION)
+    try:
+        coll = db.get_collection(COLLECTION)
+    except Exception:
+        # If the collection is missing (fresh deploy), try building from the default transcript.
+        if DEFAULT_TRANSCRIPT.exists():
+            build_index(DEFAULT_TRANSCRIPT, reset=True)
+            coll = db.get_collection(COLLECTION)
+        else:
+            st.error("Vector index not found and default transcript is missing. Please upload a transcript or rebuild locally.")
+            st.stop()
     return emb, coll
 
 
@@ -788,5 +798,5 @@ def main():
                 st.error("Please provide both a YouTube URL and API key.")
 
 
-if __name__ == "__main__":
-    main()
+# Streamlit runs this file as __main__, but call main() unconditionally for clarity.
+main()
