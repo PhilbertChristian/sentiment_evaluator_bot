@@ -506,6 +506,14 @@ def format_ts(seconds: float) -> str:
         return str(seconds)
 
 
+def speaker_display(speaker_id: str) -> str:
+    """Map raw speaker id to friendly name using SPEAKER_NAMES."""
+    if not speaker_id:
+        return "?"
+    letter = speaker_id[-1].upper()
+    return SPEAKER_NAMES.get(speaker_id, SPEAKER_NAMES.get(letter, speaker_id))
+
+
 def retrieve(question: str, k: int = 6, conversation_history: list = None, openai_key: str = None):
     """
     Retrieve relevant snippets and generate an answer using GPT-4o.
@@ -542,7 +550,8 @@ def retrieve(question: str, k: int = 6, conversation_history: list = None, opena
 
     snippets = []
     for _, doc, m in top:
-        speaker = m.get("personId") or m.get("speaker") or "?"
+        raw_speaker = m.get("personId") or m.get("speaker") or "?"
+        speaker = speaker_display(raw_speaker)
         snippets.append(
             f"[{speaker} @ {format_ts(m.get('startTime'))}-{format_ts(m.get('endTime'))}] {doc}"
         )
@@ -553,7 +562,9 @@ def retrieve(question: str, k: int = 6, conversation_history: list = None, opena
         "Use the provided transcript snippets to answer questions accurately. "
         "Be concise, cite speakers by name, and reference timestamps when relevant. "
         "If the user asks for clarification, corrections, or follow-ups, use the conversation history. "
-        "If the user gives feedback, adjust your response accordingly."
+        "If the user gives feedback, adjust your response accordingly. "
+        "Canonical speaker names: A=Adam, B=Tal, speaker_1=Adam, speaker_2=Tal. "
+        "If asked for the names of the debaters, respond with Adam and Tal."
     )
     
     messages = [{"role": "system", "content": system_prompt}]
